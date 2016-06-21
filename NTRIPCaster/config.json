@@ -1,0 +1,27 @@
+﻿{
+    "ServerAddress": "127.0.0.1",
+    "ServerPort": 9080,
+    "MaxClients":  10,
+    "Users": [
+        {
+            "Name": "test",
+            "Password": "1234",
+            "Mountpoints": [ "test" ]
+        }
+    ],
+    "Sources": [
+        {
+            "Mountpoint": "test",
+            "Identifier": "Demo Mountpoint",
+            "Format": "RTCM 3",
+            "Carrier": "L1",
+            "NavSystem": "GPS",
+            "Network": "My own network",
+            "Country": "CHE",
+            "Latitude": 47.0,
+            "Longitude": 8.0,
+            "AuthRequired": false,
+            "Password": "1234"
+        }
+    ]
+}
