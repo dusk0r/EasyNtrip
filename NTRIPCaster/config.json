@@ -1,6 +1,6 @@
 ﻿{
     "ServerAddress": "127.0.0.1",
-    "ServerPort": 9080,
+    "ServerPort": 5000,
     "MaxClients":  10,
     "Users": [
         {

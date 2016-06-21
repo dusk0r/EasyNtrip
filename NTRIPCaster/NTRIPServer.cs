@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -16,15 +17,15 @@ namespace NTRIPCaster {
     public class NTRIPServer {
         private Config Config;
         private TcpListener Listener;
-        private Dictionary<string, IList<Socket>> Clients;
+        private Dictionary<string, IImmutableList<Socket>> Clients;
 
         public NTRIPServer(Config config) {
             this.Config = config;
             this.Listener = new TcpListener(IPAddress.Parse(config.ServerAddress), config.ServerPort);
-            this.Clients = new Dictionary<string, IList<Socket>>();
+            this.Clients = new Dictionary<string, IImmutableList<Socket>>();
 
             foreach (var source in config.Sources) {
-                this.Clients.Add(source.Mountpoint, new List<Socket>());
+                this.Clients.Add(source.Mountpoint, ImmutableList.Create<Socket>());
             }
         }
 
@@ -96,7 +97,10 @@ namespace NTRIPCaster {
                 if (!source.AuthRequired || 
                     (user != null && user.Password.Equals(parsedHeaders.Password, StringComparison.OrdinalIgnoreCase) && user.Mountpoints.Contains(parsedHeaders.Mountpoint))) {
                     socket.Send(Encoding.ASCII.GetBytes("ICY 200 OK\r\n"));
-                    Clients[parsedHeaders.Mountpoint].Add(socket);
+                    socket.SendTimeout = 1000;
+                    lock (Clients) {
+                        Clients[parsedHeaders.Mountpoint] = Clients[parsedHeaders.Mountpoint].Add(socket);
+                    }
                 } else {
                     SendToSocket(socket, "ERROR - Bad Password");
                     socket.Close();
@@ -107,41 +111,34 @@ namespace NTRIPCaster {
         private void ProcessSource(Socket socket, string mountpoint) {
             var buffer = new byte[1024];
             socket.Blocking = true;
-            //socket.ReceiveTimeout = 100;
-            var toRemove = new List<Socket>();
+            socket.ReceiveTimeout = 10000;
+            var socketsToRemove = new ConcurrentBag<Socket>();
 
             try {
                 while (socket.Connected) {
                     var bytesCount = socket.Receive(buffer);
 
-                    foreach (var client in Clients[mountpoint]) {
+                    Parallel.ForEach(Clients[mountpoint], client => {
                         try {
                             client.Send(buffer, bytesCount, SocketFlags.None);
                         } catch (SocketException) {
                             try {
-                                socket.Close();
+                                client.Close();
                             } finally {
-                                toRemove.Add(socket);
+                                socketsToRemove.Add(client);
                             }
                         }
-                    }
+                    });
 
-                    foreach (var item in toRemove) {
-                        Clients[mountpoint].Remove(item);
+                    if (socketsToRemove.Count > 0) {
+                        lock (Clients[mountpoint]) {
+                            Clients[mountpoint] = Clients[mountpoint].RemoveRange(socketsToRemove);
+                        }
+                        socketsToRemove = new ConcurrentBag<Socket>();
                     }
-                    toRemove.Clear();
-
-                    //Parallel.ForEach(Clients[mountpoint], client => {
-                    //    try {
-                    //        client.Send(buffer, bytesCount, SocketFlags.None);
-                    //    } catch (SocketException) {
-                    //lock (Clients) {
-                    //        //Clients[mountpoint].
-                    //}
-                    //    }
-                    //});
                 }
             } catch (SocketException) {
+            } finally {
                 socket.Close();
             }
         }
@@ -223,7 +220,7 @@ namespace NTRIPCaster {
                     } else if (header.StartsWith("Source-Agent:", StringComparison.Ordinal)) {
                         parsedHeaders.Agent = header.Substring("Source-Agent:".Length).TrimStart();
                     } else {
-                        Console.WriteLine("Unbekannter header: " + header);
+                        Console.WriteLine("ignore header: " + header);
                     }
                 }
 
