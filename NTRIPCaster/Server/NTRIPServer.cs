@@ -1,36 +1,61 @@
 ﻿using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
-using System.Reflection;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
-using System.Threading.Tasks;
 using NTRIPCaster.Configs;
 
-namespace NTRIPCaster {
+namespace NTRIPCaster.Server {
 
-    public class NTRIPServer {
+    public class NTRIPServer : IDisposable {
         private Config Config;
         private TcpListener Listener;
-        private Dictionary<string, IImmutableList<Socket>> Clients;
+        private IDictionary<string, ImmutableList<ClientConnection>> Clients;
+        private object lockObj = new object();
+        private Thread ServerThread;
 
         public NTRIPServer(Config config) {
             this.Config = config;
             this.Listener = new TcpListener(IPAddress.Parse(config.ServerAddress), config.ServerPort);
-            this.Clients = new Dictionary<string, IImmutableList<Socket>>();
+            this.Clients = new Dictionary<string, ImmutableList<ClientConnection>>();
 
             foreach (var source in config.Sources) {
-                this.Clients.Add(source.Mountpoint, ImmutableList.Create<Socket>());
+                this.Clients.Add(source.Mountpoint, ImmutableList.Create<ClientConnection>());
             }
         }
 
         public void Start() {
-            new Thread(() => ProcessRequests()).Start();
+            ServerThread = new Thread(() => ProcessRequests());
+            ServerThread.Start();
+        }
+
+        public void Stop() {
+            // TODO: Proper Shutdown
+            if (ServerThread != null) {
+                ServerThread.Abort();
+            }
+            Environment.Exit(0);
+        }
+
+        public IEnumerable<ClientConnection> GetClients(string mountpoint) {
+            return Clients[mountpoint];
+        }
+
+        public void AddClient(ClientConnection client) {
+            Console.WriteLine($"Add Client: {client.Id}");
+            lock(lockObj) {
+                this.Clients[client.Mountpoint] = this.Clients[client.Mountpoint].Add(client);
+            }
+        }
+
+        public void RemoveClient(ClientConnection client) {
+            Console.WriteLine($"Remove Client: {client.Id}");
+            lock (lockObj) {
+                this.Clients[client.Mountpoint] = this.Clients[client.Mountpoint].Remove(client);
+            }
         }
 
         private void ProcessRequests() {
@@ -57,7 +82,7 @@ namespace NTRIPCaster {
             var parsedHeaders = ParsedHttpHeaders.Parse(headersText);
 
             if (!parsedHeaders.IsNTRIP) {
-                var response = "HTTP/1.0 200 OK\r\nServer: NTRIPCaster\r\nContent-Type: text/plain\r\n\r\nHello";
+                var response = "HTTP/1.0 200 OK\r\nServer: NTRIPCaster\r\nContent-Type: text/plain\r\n\r\nThis is a NTRIP Caster";
                 SendToSocket(socket, response);
                 socket.Close();
             } else if (parsedHeaders.Mountpoint == "") {
@@ -65,80 +90,64 @@ namespace NTRIPCaster {
                 SendSourcetable(socket);
                 socket.Close();
             } else if (parsedHeaders.IsSource) {
-                // Check Mountpoint
-                var source = Config.Sources.FirstOrDefault(x => x.Mountpoint == parsedHeaders.Mountpoint);
-                if (source == null) {
-                    SendSourcetable(socket);
-                    socket.Close();
-                    return;
-                }
-
-                // Check Login
-                if (!source.Password.Equals(parsedHeaders.Password, StringComparison.OrdinalIgnoreCase)) {
-                    SendToSocket(socket, "ERROR - Bad Password");
-                    socket.Close();
-                    return;
-                }
-
-                // Read Data
-                socket.Send(Encoding.ASCII.GetBytes("ICY 200 OK\r\n"));
-                ProcessSource(socket, parsedHeaders.Mountpoint);
+                ProcessSource(socket, parsedHeaders);
             } else {
-                // Check Mountpoint
-                var source = Config.Sources.FirstOrDefault(x => x.Mountpoint == parsedHeaders.Mountpoint);
-                if (source == null) {
-                    SendSourcetable(socket);
-                    socket.Close();
-                    return;
-                }
-
-                // Check Login
-                var user = Config.Users.FirstOrDefault(x => x.Name.Equals(parsedHeaders.Username, StringComparison.OrdinalIgnoreCase));
-                if (!source.AuthRequired || 
-                    (user != null && user.Password.Equals(parsedHeaders.Password, StringComparison.OrdinalIgnoreCase) && user.Mountpoints.Contains(parsedHeaders.Mountpoint))) {
-                    socket.Send(Encoding.ASCII.GetBytes("ICY 200 OK\r\n"));
-                    socket.SendTimeout = 1000;
-                    lock (Clients) {
-                        Clients[parsedHeaders.Mountpoint] = Clients[parsedHeaders.Mountpoint].Add(socket);
-                    }
-                } else {
-                    SendToSocket(socket, "ERROR - Bad Password");
-                    socket.Close();
-                }   
+                ProcessClient(socket, parsedHeaders);
             }
         }
 
-        private void ProcessSource(Socket socket, string mountpoint) {
-            var buffer = new byte[1024];
-            socket.Blocking = true;
-            socket.ReceiveTimeout = 10000;
-            var socketsToRemove = new ConcurrentBag<Socket>();
+        private void ProcessSource(Socket socket, ParsedHttpHeaders parsedHeaders) {
+            // Check Mountpoint
+            var source = Config.Sources.FirstOrDefault(x => x.Mountpoint == parsedHeaders.Mountpoint);
+            if (source == null) {
+                SendSourcetable(socket);
+                socket.Close();
+                return;
+            }
 
-            try {
-                while (socket.Connected) {
-                    var bytesCount = socket.Receive(buffer);
+            //// Check if there is another Server
+            //if (Servers[parsedHeaders.Mountpoint] != null) {
+            //    SendToSocket(socket, "ERROR - Mountpoint already in use"); // Check behavior
+            //    socket.Close();
+            //    return;
+            //}
 
-                    Parallel.ForEach(Clients[mountpoint], client => {
-                        try {
-                            client.Send(buffer, bytesCount, SocketFlags.None);
-                        } catch (SocketException) {
-                            try {
-                                client.Close();
-                            } finally {
-                                socketsToRemove.Add(client);
-                            }
-                        }
-                    });
+            // Check Login
+            if (!source.Password.Equals(parsedHeaders.Password, StringComparison.OrdinalIgnoreCase)) {
+                SendToSocket(socket, "ERROR - Bad Password");
+                socket.Close();
+                return;
+            }
 
-                    if (socketsToRemove.Count > 0) {
-                        lock (Clients[mountpoint]) {
-                            Clients[mountpoint] = Clients[mountpoint].RemoveRange(socketsToRemove);
-                        }
-                        socketsToRemove = new ConcurrentBag<Socket>();
-                    }
-                }
-            } catch (SocketException) {
-            } finally {
+            // Read Data
+            socket.Send(Encoding.ASCII.GetBytes("ICY 200 OK\r\n"));
+
+            Console.WriteLine($"New Server: {socket.RemoteEndPoint}");
+            var server = new ServerConnection(socket, parsedHeaders.Mountpoint, this);
+            server.StartProcessing();
+        }
+
+        private void ProcessClient(Socket socket, ParsedHttpHeaders parsedHeaders) {
+            // Check Mountpoint
+            var source = Config.Sources.FirstOrDefault(x => x.Mountpoint == parsedHeaders.Mountpoint);
+            if (source == null) {
+                SendSourcetable(socket);
+                socket.Close();
+                return;
+            }
+
+            // Check Login
+            var user = Config.Users.FirstOrDefault(x => x.Name.Equals(parsedHeaders.Username, StringComparison.OrdinalIgnoreCase));
+            if (!source.AuthRequired ||
+                (user != null && user.Password.Equals(parsedHeaders.Password, StringComparison.OrdinalIgnoreCase) && user.Mountpoints.Contains(parsedHeaders.Mountpoint))) {
+                socket.Send(Encoding.ASCII.GetBytes("ICY 200 OK\r\n"));
+                socket.SendTimeout = 1000;
+
+                var client = new ClientConnection(socket, parsedHeaders.Mountpoint, parsedHeaders.Username);
+                client.StrartProcessing();
+                AddClient(client);
+            } else {
+                SendToSocket(socket, "ERROR - Bad Password");
                 socket.Close();
             }
         }
@@ -180,6 +189,10 @@ namespace NTRIPCaster {
 
         private void SendToSocket(Socket socket, string str) {
             socket.Send(Encoding.ASCII.GetBytes(str));
+        }
+
+        public void Dispose() {
+            throw new NotImplementedException();
         }
 
         class ParsedHttpHeaders {
@@ -236,7 +249,7 @@ namespace NTRIPCaster {
                 if (mountpoint == null) {
                     return String.Empty;
                 }
-                return mountpoint.TrimStart(new char[] { '/' });
+                return mountpoint.ToLowerInvariant().TrimStart(new char[] { '/' });
             }
         }
     }

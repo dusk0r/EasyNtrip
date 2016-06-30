@@ -1,8 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace NTRIPCaster.Configs {
 
@@ -12,5 +9,10 @@ namespace NTRIPCaster.Configs {
         public int MaxClients;
         public IList<Source> Sources;
         public IList<User> Users;
+
+        bool CheckConfig() {
+            // TODO
+            return true;
+        }
     }
 }
