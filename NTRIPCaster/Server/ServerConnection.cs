@@ -22,7 +22,9 @@ namespace NTRIPCaster.Server {
         }
 
         public void StartProcessing() {
-            new Thread(() => Process()).Start();
+            var thread = new Thread(() => Process());
+            thread.IsBackground = true;
+            thread.Start();
         }
 
         private void Process() {

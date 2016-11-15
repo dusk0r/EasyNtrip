@@ -16,6 +16,7 @@ namespace NTRIPCaster.Server {
         private IDictionary<string, ImmutableList<ClientConnection>> Clients;
         private object lockObj = new object();
         private Thread ServerThread;
+        private volatile bool shouldStop = false;
 
         public NTRIPServer(Config config) {
             this.Config = config;
@@ -33,9 +34,11 @@ namespace NTRIPCaster.Server {
         }
 
         public void Stop() {
-            // TODO: Proper Shutdown
+            shouldStop = true;
+            Listener.Stop();
             if (ServerThread != null) {
                 ServerThread.Abort();
+                ServerThread.Join(TimeSpan.FromSeconds(10));
             }
             Environment.Exit(0);
         }
@@ -63,15 +66,24 @@ namespace NTRIPCaster.Server {
 
             Console.WriteLine($"Server is listening at {Listener.LocalEndpoint}");
 
-            while (true) {
-                var socket = Listener.AcceptSocket();
-                new Thread(() => {
-                    try {
-                        ProcessRequest(socket);
-                    } catch (Exception ex) {
-                        Console.WriteLine(ex); 
-                    }}).Start();
+            while (!shouldStop) {
+                try {
+                    var socket = Listener.AcceptSocket();
+                    var thread = new Thread(() => {
+                        try {
+                            ProcessRequest(socket);
+                        } catch (Exception ex) {
+                            Console.WriteLine(ex);
+                        }
+                    });
+                    thread.IsBackground = true;
+                    thread.Start();
+                } catch (SocketException ex) {
+                    Console.WriteLine($"SocketException: {ex.Message}");
+                }
             }
+
+            Console.WriteLine($"Stopped listening");
         }
 
         private void ProcessRequest(Socket socket) {
