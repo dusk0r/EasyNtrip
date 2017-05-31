@@ -91,20 +91,25 @@ namespace NTRIPCaster.Server {
             var bytesCount = socket.Receive(buffer);
             var headersText = Encoding.ASCII.GetString(buffer, 0, bytesCount);
 
-            var parsedHeaders = ParsedHttpHeaders.Parse(headersText);
+            try {
+                var parsedHeaders = ParsedHttpHeaders.Parse(headersText);
 
-            if (!parsedHeaders.IsNTRIP) {
-                var response = "HTTP/1.0 200 OK\r\nServer: NTRIPCaster\r\nContent-Type: text/plain\r\n\r\nThis is a NTRIP Caster";
-                SendToSocket(socket, response);
+                if (!parsedHeaders.IsNTRIP) {
+                    var response = "HTTP/1.0 200 OK\r\nServer: NTRIPCaster\r\nContent-Type: text/plain\r\n\r\nThis is a NTRIP Caster";
+                    SendToSocket(socket, response);
+                    socket.Close();
+                } else if (parsedHeaders.Mountpoint == "") {
+                    // Send Sourcetable
+                    SendSourcetable(socket);
+                    socket.Close();
+                } else if (parsedHeaders.IsSource) {
+                    ProcessSource(socket, parsedHeaders);
+                } else {
+                    ProcessClient(socket, parsedHeaders);
+                }
+            } catch (Exception) {
+                // TODO: error handling
                 socket.Close();
-            } else if (parsedHeaders.Mountpoint == "") {
-                // Send Sourcetable
-                SendSourcetable(socket);
-                socket.Close();
-            } else if (parsedHeaders.IsSource) {
-                ProcessSource(socket, parsedHeaders);
-            } else {
-                ProcessClient(socket, parsedHeaders);
             }
         }
 
